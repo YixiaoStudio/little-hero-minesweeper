@@ -1,10 +1,9 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Difficulty, GameStatus, CellData } from './types';
-import { DIFFICULTY_CONFIGS, THEME_ICONS } from './constants';
+import { DIFFICULTY_CONFIGS, THEME_ICONS, LOCAL_MESSAGES } from './constants';
 import { createBoard, plantMines, revealCell, checkWin } from './utils/gameLogic';
 import { audioService } from './services/audioService';
-import { getEncouragement } from './services/geminiService';
 import Cell from './components/Cell';
 
 const App: React.FC = () => {
@@ -13,29 +12,30 @@ const App: React.FC = () => {
   const [status, setStatus] = useState<GameStatus>(GameStatus.READY);
   const [flagsUsed, setFlagsUsed] = useState(0);
   const [timer, setTimer] = useState(0);
-  const [aiMessage, setAiMessage] = useState('你好，勇敢的排雷小英雄！点击方块开始你的挑战吧！');
-  const [isAiLoading, setIsAiLoading] = useState(false);
+  const [aiMessage, setAiMessage] = useState(LOCAL_MESSAGES.start[0]);
   const [explodedCell, setExplodedCell] = useState<{r: number, c: number} | null>(null);
   const [showResultOverlay, setShowResultOverlay] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
   
   const timerRef = useRef<number | null>(null);
-
   const config = DIFFICULTY_CONFIGS[difficulty];
 
-  const initGame = useCallback(async () => {
-    const newBoard = createBoard(config);
-    setBoard(newBoard);
+  // 辅助函数：随机获取本地话术
+  const getRandomMessage = (type: keyof typeof LOCAL_MESSAGES) => {
+    const msgs = LOCAL_MESSAGES[type];
+    return msgs[Math.floor(Math.random() * msgs.length)];
+  };
+
+  const initGame = useCallback(() => {
+    if (timerRef.current) clearInterval(timerRef.current);
     setStatus(GameStatus.READY);
+    setBoard(createBoard(config));
     setFlagsUsed(0);
     setTimer(0);
     setExplodedCell(null);
     setShowResultOverlay(false);
-    if (timerRef.current) clearInterval(timerRef.current);
-    
-    setIsAiLoading(true);
-    const msg = await getEncouragement('start');
-    setAiMessage(msg);
-    setIsAiLoading(false);
+    setIsProcessing(false);
+    setAiMessage(getRandomMessage('start'));
   }, [config]);
 
   useEffect(() => {
@@ -45,24 +45,22 @@ const App: React.FC = () => {
     };
   }, [initGame]);
 
-  const handleCellClick = async (r: number, c: number) => {
-    // 如果已经赢了，且显示了结算层，点击无效
-    if (status === GameStatus.WON && showResultOverlay) return;
-
-    // 如果已经输了，再次点击任何地方显示重新开始的弹窗
-    if (status === GameStatus.LOST) {
-      if (!showResultOverlay) {
-        setShowResultOverlay(true);
-      }
+  const handleCellClick = (r: number, c: number) => {
+    if (isProcessing) return;
+    if (status === GameStatus.WON || status === GameStatus.LOST) {
+      if (!showResultOverlay) setShowResultOverlay(true);
       return;
     }
-
     if (board[r][c].isFlagged || board[r][c].isRevealed) return;
 
-    let newBoard = [...board.map(row => row.map(cell => ({ ...cell })))];
+    setIsProcessing(true);
+    let currentStatus = status;
+    let newBoard = board.map(row => row.map(cell => ({ ...cell })));
     
-    if (status === GameStatus.READY) {
+    // 第一次点击，种植地雷
+    if (currentStatus === GameStatus.READY) {
       plantMines(newBoard, config.mines, { r, c });
+      currentStatus = GameStatus.PLAYING;
       setStatus(GameStatus.PLAYING);
       timerRef.current = window.setInterval(() => {
         setTimer(t => t + 1);
@@ -75,40 +73,39 @@ const App: React.FC = () => {
     if (hitMine) {
       setExplodedCell({ r, c });
       setStatus(GameStatus.LOST);
-      setShowResultOverlay(false); // 初始不显示结算层，只显示地图上的X
       if (timerRef.current) clearInterval(timerRef.current);
       audioService.playLose();
       
+      setAiMessage(getRandomMessage('lose'));
+      
       // 揭开所有地雷
-      newBoard.forEach(row => row.forEach(cell => {
-        if (cell.isMine) cell.isRevealed = true;
+      const finalBoard = newBoard.map(row => row.map(cell => {
+        if (cell.isMine) return { ...cell, isRevealed: true };
+        return cell;
       }));
+      setBoard(finalBoard);
       
-      setIsAiLoading(true);
-      const msg = await getEncouragement('lose');
-      setAiMessage(msg);
-      setIsAiLoading(false);
-    } else if (checkWin(newBoard)) {
-      setStatus(GameStatus.WON);
-      setShowResultOverlay(true); // 赢了直接显示
-      if (timerRef.current) clearInterval(timerRef.current);
-      audioService.playWin();
-      
-      setIsAiLoading(true);
-      const msg = await getEncouragement('win');
-      setAiMessage(msg);
-      setIsAiLoading(false);
+      // 稍微延迟显示结算界面，让孩子看清爆炸点
+      setTimeout(() => setShowResultOverlay(true), 1500);
+    } else {
+      if (checkWin(newBoard)) {
+        setStatus(GameStatus.WON);
+        setShowResultOverlay(true);
+        if (timerRef.current) clearInterval(timerRef.current);
+        audioService.playWin();
+        setAiMessage(getRandomMessage('win'));
+      }
+      setBoard(newBoard);
     }
-
-    setBoard(newBoard);
+    setIsProcessing(false);
   };
 
   const handleContextMenu = (e: React.MouseEvent, r: number, c: number) => {
     e.preventDefault();
-    if (status !== GameStatus.PLAYING && status !== GameStatus.READY) return;
+    if (isProcessing || (status !== GameStatus.PLAYING && status !== GameStatus.READY)) return;
     if (board[r][c].isRevealed) return;
 
-    const newBoard = [...board.map(row => row.map(cell => ({ ...cell })))];
+    const newBoard = board.map(row => row.map(cell => ({ ...cell })));
     const cell = newBoard[r][c];
     
     if (!cell.isFlagged && flagsUsed >= config.mines) return;
@@ -119,63 +116,58 @@ const App: React.FC = () => {
     setBoard(newBoard);
   };
 
-  const handleGetHint = async () => {
-    setIsAiLoading(true);
-    const msg = await getEncouragement('hint');
-    setAiMessage(msg);
-    setIsAiLoading(false);
+  const handleGetHint = () => {
+    setAiMessage(getRandomMessage('hint'));
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col items-center p-4">
+    <div className="min-h-screen bg-indigo-50 flex flex-col items-center p-4">
       {/* Header Section */}
-      <header className="text-center mb-6">
-        <h1 className="text-4xl font-black text-indigo-700 drop-shadow-sm mb-2">
-          小小英雄：扫雷挑战 💣
+      <header className="text-center mb-6 pt-4">
+        <h1 className="text-4xl font-black text-indigo-800 drop-shadow-sm mb-2">
+          小小英雄：扫雷大冒险 💣
         </h1>
-        <p className="text-slate-500 text-lg">
-          动脑思考，避开危险地雷，赢得排雷勋章！
+        <p className="text-indigo-600/80 text-lg">
+          动脑筋，找宝藏，避开危险的小地雷！
         </p>
       </header>
 
       {/* Stats Board */}
-      <div className="bg-white rounded-3xl shadow-xl p-6 mb-6 flex flex-wrap justify-around gap-4 w-full max-w-xl border-4 border-indigo-100">
-        <div className="flex items-center gap-2">
-          <span className="text-3xl">💣</span>
+      <div className="bg-white rounded-[2rem] shadow-xl p-6 mb-8 flex flex-wrap justify-around items-center gap-6 w-full max-w-xl border-4 border-indigo-200">
+        <div className="flex items-center gap-3">
+          <div className="bg-red-100 p-2 rounded-2xl text-3xl">🚩</div>
           <div className="flex flex-col">
-            <span className="text-xs text-slate-400 uppercase font-bold">剩余地雷</span>
-            <span className="text-2xl font-black text-red-500">{config.mines - flagsUsed}</span>
+            <span className="text-[10px] text-slate-400 uppercase font-black tracking-widest">剩余标记</span>
+            <span className="text-3xl font-black text-red-500 tabular-nums">{config.mines - flagsUsed}</span>
           </div>
         </div>
         
-        <div className="flex items-center gap-2">
-          <span className="text-3xl">⏳</span>
+        <div className="flex items-center gap-3">
+          <div className="bg-indigo-100 p-2 rounded-2xl text-3xl">⏱️</div>
           <div className="flex flex-col">
-            <span className="text-xs text-slate-400 uppercase font-bold">用时</span>
-            <span className="text-2xl font-black text-indigo-500">{timer}s</span>
+            <span className="text-[10px] text-slate-400 uppercase font-black tracking-widest">计时器</span>
+            <span className="text-3xl font-black text-indigo-600 tabular-nums">{timer}s</span>
           </div>
         </div>
 
-        <div className="flex flex-col items-center">
-           <button 
-             onClick={initGame}
-             className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-6 rounded-full shadow-lg transition-all active:scale-95 text-lg"
-           >
-             立即重开
-           </button>
-        </div>
+        <button 
+          onClick={initGame}
+          className="bg-indigo-600 hover:bg-indigo-700 text-white font-black py-3 px-8 rounded-2xl shadow-[0_4px_0_rgb(49,46,129)] active:translate-y-1 active:shadow-none transition-all text-lg"
+        >
+          重新开始
+        </button>
       </div>
 
       {/* Difficulty Selector */}
-      <div className="flex gap-2 mb-6">
+      <div className="flex gap-3 mb-8 bg-white/50 p-2 rounded-2xl backdrop-blur-sm">
         {(Object.keys(DIFFICULTY_CONFIGS) as Difficulty[]).map(d => (
           <button
             key={d}
             onClick={() => setDifficulty(d)}
-            className={`px-4 py-2 rounded-xl font-bold transition-all ${
+            className={`px-5 py-2 rounded-xl font-black transition-all ${
               difficulty === d 
-                ? 'bg-indigo-600 text-white scale-105 shadow-md' 
-                : 'bg-white text-indigo-600 border-2 border-indigo-100'
+                ? 'bg-indigo-600 text-white scale-105 shadow-lg' 
+                : 'text-indigo-600 hover:bg-white/80'
             }`}
           >
             {DIFFICULTY_CONFIGS[d].label}
@@ -183,10 +175,10 @@ const App: React.FC = () => {
         ))}
       </div>
 
-      {/* Game Board */}
-      <div className="relative p-3 bg-indigo-900 rounded-lg shadow-2xl">
+      {/* Game Board Container */}
+      <div className="relative p-4 bg-indigo-800 rounded-3xl shadow-[0_15px_50px_rgba(49,46,129,0.4)]">
         <div 
-          className="grid gap-1"
+          className="grid gap-1.5"
           style={{ gridTemplateColumns: `repeat(${config.cols}, minmax(0, 1fr))` }}
         >
           {board.map((row, r) => 
@@ -203,44 +195,41 @@ const App: React.FC = () => {
           )}
         </div>
 
-        {/* Overlay for Win/Loss - Only show when showResultOverlay is true */}
+        {/* Overlay for Win/Loss */}
         {showResultOverlay && (
-          <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center rounded-lg animate-fade-in z-20">
-             <div className="bg-white p-8 rounded-3xl shadow-2xl text-center border-b-8 border-indigo-200 transform scale-90 sm:scale-100">
-                <span className="text-7xl mb-4 block">
+          <div className="absolute inset-0 bg-indigo-900/60 backdrop-blur-md flex items-center justify-center rounded-2xl animate-in fade-in zoom-in duration-300 z-20">
+             <div className="bg-white p-10 rounded-[2.5rem] shadow-2xl text-center border-b-[10px] border-indigo-100 transform scale-100">
+                <span className="text-8xl mb-6 block animate-bounce">
                   {status === GameStatus.WON ? THEME_ICONS.WIN : THEME_ICONS.LOSE}
                 </span>
-                <h2 className="text-3xl font-black text-slate-800 mb-6">
-                  {status === GameStatus.WON ? '伟大的胜利！' : '哎呀，挑战失败了'}
+                <h2 className="text-4xl font-black text-slate-800 mb-8">
+                  {status === GameStatus.WON ? '你太棒了！' : '再来一次吗？'}
                 </h2>
                 <button 
                   onClick={initGame}
-                  className="bg-indigo-600 hover:bg-indigo-700 text-white px-8 py-3 rounded-full text-xl font-bold shadow-xl active:scale-95"
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white px-12 py-4 rounded-2xl text-2xl font-black shadow-[0_6px_0_rgb(49,46,129)] active:translate-y-1 active:shadow-none transition-all"
                 >
-                  开始新挑战
+                  继续挑战
                 </button>
              </div>
           </div>
         )}
       </div>
 
-      {/* AI Assistant Section */}
-      <div className="mt-8 w-full max-w-xl">
-        <div className="bg-amber-50 border-4 border-amber-200 rounded-3xl p-6 flex items-start gap-4 shadow-lg relative">
-          <div className="bg-amber-400 p-2 rounded-full text-3xl shadow-md">🧙‍♂️</div>
-          <div className="flex-1">
-            <h3 className="text-amber-800 font-black mb-1 flex items-center gap-2">
-              智慧导师
-              {isAiLoading && <span className="inline-block w-4 h-4 border-2 border-amber-600 border-t-transparent rounded-full animate-spin"></span>}
-            </h3>
-            <p className="text-amber-900 italic leading-relaxed font-medium">
+      {/* Local Mentor Section */}
+      <div className="mt-10 w-full max-w-xl">
+        <div className="bg-white border-4 border-amber-300 rounded-[2.5rem] p-8 flex items-start gap-6 shadow-xl relative overflow-hidden">
+          <div className="absolute top-0 right-0 w-24 h-24 bg-amber-100 rounded-full -mr-12 -mt-12 opacity-50"></div>
+          <div className="bg-amber-400 p-4 rounded-3xl text-4xl shadow-inner relative z-10">🧙‍♂️</div>
+          <div className="flex-1 relative z-10">
+            <h3 className="text-amber-800 text-xl font-black mb-2">智慧导师</h3>
+            <p className="text-slate-700 text-lg leading-relaxed font-bold">
               "{aiMessage}"
             </p>
           </div>
           <button 
             onClick={handleGetHint}
-            disabled={isAiLoading || status !== GameStatus.PLAYING}
-            className={`absolute -top-4 -right-4 bg-white border-2 border-amber-300 p-3 rounded-full shadow-lg hover:bg-amber-100 transition-colors ${status !== GameStatus.PLAYING ? 'opacity-50 grayscale' : ''}`}
+            className="absolute top-4 right-4 bg-amber-50 border-2 border-amber-200 p-3 rounded-full shadow hover:bg-amber-100 transition-all active:scale-95"
             title="寻求提示"
           >
             💡
@@ -248,10 +237,20 @@ const App: React.FC = () => {
         </div>
       </div>
 
-      {/* Help Note */}
-      <footer className="mt-12 text-sm text-slate-400 max-w-md text-center">
-        <p>游戏指南：踩到地雷后，它会打上红色的叉号。此时你可以点击任意位置来重新开始游戏。加油！</p>
+      <footer className="mt-12 text-slate-400 font-bold">
+        长按/右键可以插上小红旗标记地雷哦！🚩
       </footer>
+
+      <style>{`
+        @keyframes shake {
+          0%, 100% { transform: translateX(0); }
+          25% { transform: translateX(-4px) rotate(-2deg); }
+          75% { transform: translateX(4px) rotate(2deg); }
+        }
+        .animate-shake {
+          animation: shake 0.2s ease-in-out infinite;
+        }
+      `}</style>
     </div>
   );
 };

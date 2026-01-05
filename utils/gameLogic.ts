@@ -27,16 +27,16 @@ export function plantMines(board: CellData[][], mineCount: number, firstClick: {
   const cols = board[0].length;
   let planted = 0;
 
+  // 1. 放置地雷，避开首踩点及其 3x3 邻居
   while (planted < mineCount) {
     const r = Math.floor(Math.random() * rows);
     const c = Math.floor(Math.random() * cols);
 
-    // Don't plant mine on first click or already planted cell
-    if (
-      (r === firstClick.r && c === firstClick.c) || 
-      board[r][c].isMine ||
-      (Math.abs(r - firstClick.r) <= 1 && Math.abs(c - firstClick.c) <= 1)
-    ) {
+    // 核心改进：扩大安全区，不仅避开首踩，还要避开周围8个格子
+    // 这保证了第一下点开必然是一个大空白区
+    const isSafeZone = Math.abs(r - firstClick.r) <= 1 && Math.abs(c - firstClick.c) <= 1;
+
+    if (isSafeZone || board[r][c].isMine) {
       continue;
     }
 
@@ -44,7 +44,7 @@ export function plantMines(board: CellData[][], mineCount: number, firstClick: {
     planted++;
   }
 
-  // Calculate neighbors
+  // 2. 计算每个格子的邻居地雷数
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       if (!board[r][c].isMine) {
@@ -77,7 +77,7 @@ export function revealCell(board: CellData[][], r: number, c: number): boolean {
 
   board[r][c].isRevealed = true;
 
-  if (board[r][c].isMine) return true; // Hit a mine
+  if (board[r][c].isMine) return true; // 踩雷
 
   if (board[r][c].neighborCount === 0) {
     const neighbors = getNeighbors(board, r, c);
